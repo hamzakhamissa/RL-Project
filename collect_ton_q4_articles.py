@@ -1,49 +1,6 @@
 #!/usr/bin/env python3
 """
-High-volume Q4 2025 article collector for NVDA, GOOGL/GOOG, and TSLA.
-
-Goal:
-- collect a TON of raw candidate articles from 2025-10-01 to 2025-12-31
-- keep the fields you care about:
-    timestamp (date + time)
-    headline
-    source / publisher
-    ticker
-    full article text (when accessible)
-    url
-    author
-    tags / category
-- deduplicate aggressively
-- optionally enrich from multiple sources
-- respect rate limits with backoff
-
-Primary source:
-- Finnhub company-news endpoint (best practical ticker/date-range backbone)
-
-Optional broadening source:
-- GDELT DOC API (broad historical news search; useful for adding recall)
-
-Docs:
-- Finnhub company news: historical company news by symbol/date range
-- GDELT: open global news search/index
-
-Install:
-    pip install requests pandas trafilatura python-dateutil beautifulsoup4
-
-Usage:
-    export FINNHUB_API_KEY="YOUR_KEY"
-    python collect_ton_q4_articles.py
-
-Optional wider mode:
-    python collect_ton_q4_articles.py --use-gdelt
-
-Optional metadata-only mode:
-    python collect_ton_q4_articles.py --no-scrape
-
-Outputs:
-    raw_articles_q4_2025.csv
-    raw_articles_q4_2025.jsonl
-    collection_summary.json
+Collect and optionally enrich Q4 2025 article data for NVDA, GOOGL, and TSLA.
 """
 
 from __future__ import annotations
@@ -55,12 +12,11 @@ import math
 import os
 import random
 import re
-import sys
 import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Callable, Dict, Iterable, List, Optional
-from urllib.parse import urlparse, urlunparse, quote_plus
+from urllib.parse import urlparse, urlunparse
 
 import pandas as pd
 import requests
@@ -150,7 +106,6 @@ def load_local_env(path: Path) -> Dict[str, str]:
         else:
             bare_values.append(line)
 
-    # Support a one-line file that contains only the token.
     if "FINNHUB_API_KEY" not in values and len(bare_values) == 1:
         values["FINNHUB_API_KEY"] = bare_values[0]
 
@@ -168,7 +123,6 @@ def normalize_url(url: str) -> str:
         return ""
     try:
         p = urlparse(url)
-        # Finnhub article links use the query string to hold the article id.
         if p.netloc.lower().endswith("finnhub.io") and p.path == "/api/news":
             p = p._replace(fragment="")
         else:
@@ -322,7 +276,6 @@ def fetch_finnhub_company_news(
         data = resp.json()
         if not isinstance(data, list):
             raise RuntimeError(f"Unexpected Finnhub response for {symbol}: {data}")
-        log(f"Finnhub returned {len(data)} rows for {symbol} in {window_start} -> {window_end}")
         sleep_with_jitter(1.2, 0.6)
 
         for item in data:
@@ -350,7 +303,6 @@ def fetch_finnhub_company_news(
 
 
 def fetch_gdelt_articles(session: requests.Session, ticker: str, query: str, start: str, end: str, max_records: int = 250) -> List[dict]:
-    # GDELT uses YYYYMMDDHHMMSS
     start_g = start.replace("-", "") + "000000"
     end_g = end.replace("-", "") + "235959"
     params = {
@@ -373,7 +325,6 @@ def fetch_gdelt_articles(session: requests.Session, ticker: str, query: str, sta
         title = item.get("title") or ""
         dt = parse_any_datetime(item.get("seendate") or item.get("socialimage"))
         if dt is None:
-            # seendate often looks like 20251005T134500Z
             raw = item.get("seendate")
             if isinstance(raw, str):
                 try:
@@ -409,7 +360,6 @@ def dedupe_articles(df: pd.DataFrame) -> pd.DataFrame:
     df["normalized_url"] = df["url"].fillna("").map(normalize_url)
     df["normalized_headline"] = df["headline"].fillna("").str.lower().map(clean_text)
 
-    # Keep higher-tier source first, then longer summary/full text, then newer record
     tier_rank = {"high": 0, "mid": 1, "low": 2}
     df["tier_rank"] = df["source_tier"].map(lambda x: tier_rank.get(x, 3))
     df["text_len"] = df["full_text"].fillna("").str.len() + df["summary"].fillna("").str.len()
@@ -436,7 +386,6 @@ def enrich_articles(
 ) -> pd.DataFrame:
     df = df.copy()
 
-    # Prefer high-value sources first, then rows with summaries, then recency
     tier_rank = {"high": 0, "mid": 1, "low": 2}
     df["tier_rank"] = df["source_tier"].map(lambda x: tier_rank.get(x, 3))
     df["summary_len"] = df["summary"].fillna("").str.len()
@@ -612,7 +561,6 @@ def main():
 
         rows: List[dict] = []
 
-        # 1) Finnhub backbone
         for symbol in args.symbols:
             log(f"\n=== Finnhub: {symbol} ===")
             rows.extend(fetch_finnhub_company_news(
@@ -624,7 +572,6 @@ def main():
                 window_days=args.finnhub_window_days,
             ))
 
-        # 2) Optional GDELT widening
         if args.use_gdelt:
             for symbol in args.symbols:
                 for query in SYMBOL_CONFIG[symbol]["queries"]:
@@ -646,12 +593,10 @@ def main():
 
         df = pd.DataFrame(rows)
 
-        # filter obvious junk
         df = df[~df["url"].fillna("").map(is_blocked_domain)].copy()
         df["headline"] = df["headline"].fillna("").map(clean_text)
         df = df[df["headline"].str.len() > 10].copy()
 
-        # dedupe before expensive scraping
         df = dedupe_articles(df)
         date_range = {"start": args.start, "end": args.end}
         symbols = args.symbols
