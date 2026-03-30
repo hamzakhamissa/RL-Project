@@ -204,12 +204,12 @@ def request_with_backoff(session: requests.Session, url: str, *, params=None, ti
             resp = session.get(url, params=params, timeout=timeout, headers={"User-Agent": USER_AGENT})
             if resp.status_code == 429:
                 wait = min(90, (2 ** attempt) + random.random() * 2)
-                log(f"429 -> sleeping {wait:.1f}s")
+                log(f"Rate limited, retrying in {wait:.1f}s")
                 time.sleep(wait)
                 continue
             if 500 <= resp.status_code < 600:
                 wait = min(45, (2 ** attempt) + random.random() * 2)
-                log(f"{resp.status_code} -> sleeping {wait:.1f}s")
+                log(f"Server error {resp.status_code}, retrying in {wait:.1f}s")
                 time.sleep(wait)
                 continue
             resp.raise_for_status()
@@ -217,7 +217,7 @@ def request_with_backoff(session: requests.Session, url: str, *, params=None, ti
         except Exception as e:
             err = e
             wait = min(45, (2 ** attempt) + random.random() * 2)
-            log(f"Request failed ({type(e).__name__}: {e}) -> sleeping {wait:.1f}s")
+            log(f"Request failed ({type(e).__name__}: {e}), retrying in {wait:.1f}s")
             time.sleep(wait)
     raise RuntimeError(f"Request failed after retries: {err}")
 
@@ -270,7 +270,7 @@ def fetch_finnhub_company_news(
 ) -> List[dict]:
     out = []
     for window_start, window_end in iter_date_windows(start, end, window_days):
-        log(f"Finnhub window {symbol}: {window_start} -> {window_end}")
+        log(f"Fetching {symbol} news for {window_start} to {window_end}")
         params = {"symbol": symbol, "from": window_start, "to": window_end, "token": api_key}
         resp = request_with_backoff(session, FINNHUB_BASE, params=params)
         data = resp.json()
@@ -403,7 +403,7 @@ def enrich_articles(
     writes_since_save = 0
 
     for i, row in df.iterrows():
-        log(f"Enriching {i+1}/{len(df)} | {row['ticker']} | {row['source']} | {row['headline'][:90]}")
+        log(f"[{i + 1}/{len(df)}] {row['ticker']} {row['source']}: {row['headline'][:90]}")
         url = row.get("url", "")
         current_text = full_texts[i] if i < len(full_texts) else ""
         current_author = authors[i] if i < len(authors) else ""
@@ -562,7 +562,7 @@ def main():
         rows: List[dict] = []
 
         for symbol in args.symbols:
-            log(f"\n=== Finnhub: {symbol} ===")
+            log(f"Collecting Finnhub news for {symbol}")
             rows.extend(fetch_finnhub_company_news(
                 session,
                 api_key,
@@ -575,7 +575,7 @@ def main():
         if args.use_gdelt:
             for symbol in args.symbols:
                 for query in SYMBOL_CONFIG[symbol]["queries"]:
-                    log(f"\n=== GDELT: {symbol} | {query} ===")
+                    log(f"Collecting GDELT matches for {symbol}: {query}")
                     try:
                         rows.extend(fetch_gdelt_articles(
                             session,
@@ -609,9 +609,8 @@ def main():
             ascending=[True, False, True, False],
         ).reset_index(drop=True)
         write_outputs(checkpoint_df, outdir, date_range, symbols)
-        log(f"Checkpoint saved to {outdir}")
+        log(f"Saved checkpoint to {outdir}")
 
-    # enrich
     df = enrich_articles(
         session=session,
         df=df,
@@ -622,7 +621,6 @@ def main():
         save_callback=save_checkpoint,
     )
 
-    # quality score and final ordering
     df["quality_score"] = df.apply(quality_score, axis=1)
     df = df.sort_values(
         ["ticker", "quality_score", "source_tier", "published_at_utc"],
