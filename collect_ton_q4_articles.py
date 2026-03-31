@@ -1,7 +1,4 @@
 #!/usr/bin/env python3
-"""
-Collect and optionally enrich Q4 2025 article data for NVDA, GOOGL, and TSLA.
-"""
 
 from __future__ import annotations
 

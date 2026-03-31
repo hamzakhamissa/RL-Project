@@ -3,3 +3,16 @@ requests
 beautifulsoup4
 trafilatura
 python-dateutil
+vaderSentiment
+jupyter
+notebook
+ipykernel
+matplotlib
+seaborn
+numpy
+scikit-learn
+gymnasium
+stable-baselines3[extra]
+torch
+transformers
+tqdm
