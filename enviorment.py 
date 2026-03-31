@@ -1,20 +1,46 @@
+"""
+enviorment.py  —  Trading Environment
+======================================
+Gymnasium-compatible single-asset trading environment.
+Updated to load real Q4 2025 data via sub_data.py instead of
+the synthetic GBM generator.
+
+Original structure preserved; changes are marked  # <-- CHANGED
+"""
+
 import numpy as np
+import pandas as pd
 import gymnasium as gym
 from gymnasium import spaces
+
+# <-- CHANGED: import real data pipeline instead of synthetic generator
+from sub_data import get_env_data, FEAT_COLS
+
 
 class TradingEnv(gym.Env):
     """
     Single-asset day trading environment.
+
     State  : [returns, sma_ratio, volatility, momentum, position]
     Actions: 0=hold, 1=buy, 2=sell
     Reward : change in portfolio value (PnL)
+
+    Parameters
+    ----------
+    features     : pd.DataFrame
+        Feature table with columns matching FEAT_COLS plus 'close'.
+        Pass the output of sub_data.compute_features() directly.
+    initial_cash : float
+        Starting portfolio cash (default $10 000).
     """
+
+    # <-- CHANGED: feat_cols kept in sync with sub_data.FEAT_COLS
+    feat_cols = FEAT_COLS   # ["returns", "sma_ratio", "volatility", "momentum"]
 
     def __init__(self, features: pd.DataFrame, initial_cash: float = 10_000):
         super().__init__()
-        self.features     = features
+        self.features     = features.reset_index(drop=True)
         self.prices       = features["close"].values
-        self.feat_cols    = ["returns", "sma_ratio", "volatility", "momentum"]
         self.initial_cash = initial_cash
 
         n_features = len(self.feat_cols) + 1  # +1 for position
@@ -25,10 +51,12 @@ class TradingEnv(gym.Env):
         self.action_space = spaces.Discrete(3)  # hold / buy / sell
         self.reset()
 
+    # ------------------------------------------------------------------
     def _get_obs(self):
         row = self.features.iloc[self.step_idx][self.feat_cols].values
         return np.append(row, self.position).astype(np.float32)
 
+    # ------------------------------------------------------------------
     def reset(self, seed=None):
         super().reset(seed=seed)
         self.step_idx  = 0
@@ -38,6 +66,7 @@ class TradingEnv(gym.Env):
         self.history   = []
         return self._get_obs(), {}
 
+    # ------------------------------------------------------------------
     def step(self, action):
         price = self.prices[self.step_idx]
 
@@ -53,17 +82,77 @@ class TradingEnv(gym.Env):
         self.step_idx += 1
         done = self.step_idx >= len(self.features) - 1
 
-        new_price     = self.prices[self.step_idx]
-        new_portfolio = self.cash + self.position * new_price
-        reward        = new_portfolio - self.portfolio  # PnL reward
+        new_price      = self.prices[self.step_idx]
+        new_portfolio  = self.cash + self.position * new_price
+        reward         = new_portfolio - self.portfolio   # PnL reward
         self.portfolio = new_portfolio
         self.history.append(self.portfolio)
 
         return self._get_obs(), reward, done, False, {}
 
+    # ------------------------------------------------------------------
     def sharpe_ratio(self) -> float:
-        """Evaluate agent quality after an episode."""
-        returns = np.diff(self.history) / np.array(self.history[:-1])
+        """Risk-adjusted return over the completed episode."""
+        if len(self.history) < 2:
+            return 0.0
+        h       = np.array(self.history)
+        returns = np.diff(h) / np.maximum(h[:-1], 1e-8)
         if returns.std() == 0:
             return 0.0
-        return (returns.mean() / returns.std()) * np.sqrt(252)
+        return float((returns.mean() / returns.std()) * np.sqrt(252))
+
+    # ------------------------------------------------------------------
+    def cumulative_return(self) -> float:
+        """Total return over the episode."""
+        if len(self.history) < 1:
+            return 0.0
+        return float((self.history[-1] - self.initial_cash) / self.initial_cash)
+
+    def max_drawdown(self) -> float:
+        """Maximum peak-to-trough drawdown over the episode."""
+        if len(self.history) < 2:
+            return 0.0
+        h    = np.array(self.history)
+        peak = np.maximum.accumulate(h)
+        dd   = (h - peak) / np.maximum(peak, 1e-8)
+        return float(dd.min())
+
+
+# ---------------------------------------------------------------------------
+# Factory helper: build env directly from a ticker string
+# ---------------------------------------------------------------------------
+
+def make_env(ticker: str, initial_cash: float = 10_000) -> TradingEnv:
+    """
+    Convenience constructor — load real data and return a ready-to-use env.
+
+    Usage
+    -----
+        env = make_env("TSLA")
+        state, _ = env.reset()
+    """
+    features, _ = get_env_data(ticker)
+    return TradingEnv(features, initial_cash=initial_cash)
+
+
+# ---------------------------------------------------------------------------
+# Quick test
+# ---------------------------------------------------------------------------
+
+if __name__ == "__main__":
+    from sub_data import compute_features, load_ticker
+
+    for ticker in ("TSLA", "NVDA", "GOOG"):
+        features, _ = get_env_data(ticker)
+        env = TradingEnv(features)
+        obs, _ = env.reset()
+        print(f"\n{ticker}  obs_dim={obs.shape[0]}  steps={len(features)}")
+
+        done = False
+        while not done:
+            action = env.action_space.sample()
+            obs, reward, done, _, _ = env.step(action)
+
+        print(f"  Sharpe={env.sharpe_ratio():.3f}  "
+              f"CumRet={env.cumulative_return():.2%}  "
+              f"MaxDD={env.max_drawdown():.2%}")

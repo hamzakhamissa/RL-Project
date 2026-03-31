@@ -1,54 +1,379 @@
-import matplotlib.pyplot as plt
+"""
+train.py  —  Training Script
+=============================
+Trains a PPO agent on real Q4 2025 market data (TSLA, NVDA, GOOG).
+Adds walk-forward cross-validation and multi-seed averaging on top of
+the original training loop.
 
-def train(n_episodes=100, update_timestep=2000):
-    # --- Data & Environment ---
-    prices = add_regime_shocks(generate_prices())
-    features = compute_features(prices) # Ensure compute_features includes 'sentiment' [cite: 9]
-    env = TradingEnv(features)
-    
+Original loop structure preserved; changes marked  # <-- CHANGED / ADDED
+"""
+
+import numpy as np                                      # <-- ADDED
+import matplotlib.pyplot as plt
+import matplotlib.gridspec as gridspec                  # <-- ADDED
+
+# <-- CHANGED: import real data pipeline
+from sub_data import (
+    get_env_data,
+    train_test_split,
+    walk_forward_folds,
+    TICKER_FILES,
+)
+from enviorment import TradingEnv
+from RL_agent   import PPOAgent
+
+# ---------------------------------------------------------------------------
+# Config
+# ---------------------------------------------------------------------------
+N_EPISODES      = 100     # episodes per seed per fold
+UPDATE_TIMESTEP = 200     # PPO memory flush interval  <-- CHANGED: 2000→200 (short data)
+N_SEEDS         = 5       # independent weight initialisations per fold
+N_FOLDS         = 3       # walk-forward folds
+TRAIN_RATIO     = 0.80    # 80 % train / 20 % test
+TICKERS         = list(TICKER_FILES.keys())   # ["TSLA", "NVDA", "GOOG"]
+
+
+# ---------------------------------------------------------------------------
+# Core training loop  (one seed, one env)
+# ---------------------------------------------------------------------------
+
+def train(env: TradingEnv,
+          n_episodes:      int = N_EPISODES,
+          update_timestep: int = UPDATE_TIMESTEP,
+          seed:            int = 42):
+    """
+    Train a PPO agent on `env` for `n_episodes` episodes.
+
+    Returns
+    -------
+    agent       : trained PPOAgent
+    rewards_log : list of per-episode cumulative rewards
+    sharpe_log  : list of per-episode Sharpe ratios
+    """
+    # Seed numpy for reproducibility
+    np.random.seed(seed)
+
     agent = PPOAgent(
         state_dim = env.observation_space.shape[0],
         n_actions = env.action_space.n
     )
 
-    memory = {'states': [], 'actions': [], 'logprobs': [], 'rewards': [], 'is_terminals': []}
-    timestep = 0
-    rewards_log, sharpe_log = [], []
+    memory = {
+        'states': [], 'actions': [], 'logprobs': [],
+        'rewards': [], 'is_terminals': []
+    }
+    timestep    = 0
+    rewards_log = []
+    sharpe_log  = []
 
     for ep in range(n_episodes):
         state, _ = env.reset()
         ep_reward = 0
-        
+
         while True:
             timestep += 1
-            # Select action using current policy
+
+            # Select action using current (old) policy
             action, log_prob = agent.act(state)
-            
+
             next_state, reward, done, _, _ = env.step(action)
-            
-            # Save to memory for update
+
+            # Store transition
             memory['states'].append(state)
             memory['actions'].append(action)
             memory['logprobs'].append(log_prob)
             memory['rewards'].append(reward)
             memory['is_terminals'].append(done)
-            
-            state = next_state
+
+            state      = next_state
             ep_reward += reward
-            
-            # Update agent after update_timestep
+
+            # PPO update when buffer is full
             if timestep % update_timestep == 0:
                 agent.update(memory)
-                memory = {k: [] for k in memory} # Clear memory
+                memory = {k: [] for k in memory}
 
             if done:
                 break
-        
+
         sharpe = env.sharpe_ratio()
         rewards_log.append(ep_reward)
         sharpe_log.append(sharpe)
-        
+
         if ep % 10 == 0:
-            print(f"Episode {ep} | Reward: {ep_reward:.2f} | Sharpe: {sharpe:.3f}")
+            print(f"    ep {ep:3d}/{n_episodes} | "
+                  f"reward={ep_reward:.2f} | sharpe={sharpe:.3f}")
 
     return agent, rewards_log, sharpe_log
+
+
+# ---------------------------------------------------------------------------
+# Evaluate a trained agent on a test environment
+# ---------------------------------------------------------------------------
+
+def evaluate(agent: PPOAgent, env: TradingEnv) -> dict:
+    """Run one deterministic episode; return performance metrics."""
+    state, _ = env.reset()
+    done      = False
+    while not done:
+        action, _ = agent.act(state)
+        state, _, done, _, _ = env.step(action)
+
+    return {
+        "sharpe_ratio":      env.sharpe_ratio(),
+        "cumulative_return": env.cumulative_return(),
+        "max_drawdown":      env.max_drawdown(),
+        "final_value":       env.history[-1] if env.history else env.initial_cash,
+        "portfolio_history": list(env.history),
+    }
+
+
+# ---------------------------------------------------------------------------
+# Walk-forward multi-seed runner
+# ---------------------------------------------------------------------------
+
+def run_walk_forward(ticker: str,
+                     n_folds:    int   = N_FOLDS,
+                     n_seeds:    int   = N_SEEDS,
+                     n_episodes: int   = N_EPISODES,
+                     train_ratio: float = TRAIN_RATIO) -> dict:
+    """
+    Run walk-forward CV for one ticker.
+    For each fold, train `n_seeds` independent agents on the training window
+    and evaluate all of them on the held-out test window.
+
+    Returns a dict with per-fold results and aggregated mean ± std.
+    """
+    print(f"\n{'='*60}")
+    print(f"  {ticker}")
+    print(f"{'='*60}")
+
+    features, _ = get_env_data(ticker)
+    print(f"  Total rows after warm-up : {len(features)}")
+
+    folds = walk_forward_folds(features, n_folds=n_folds,
+                               train_ratio=train_ratio)
+    print(f"  Walk-forward : {len(folds)} folds | "
+          f"{n_seeds} seeds/fold | {n_episodes} episodes/seed\n")
+
+    fold_results = []
+
+    for fi, (train_df, test_df) in enumerate(folds):
+        print(f"  ─── Fold {fi+1}/{len(folds)}  "
+              f"train={len(train_df)}d  test={len(test_df)}d ───")
+
+        seed_metrics = {
+            "sharpe_ratio":      [],
+            "cumulative_return": [],
+            "max_drawdown":      [],
+            "final_value":       [],
+        }
+        training_curves  = []
+        best_sharpe      = -np.inf
+        best_history     = None
+        best_rewards_log = None
+
+        for s in range(n_seeds):
+            seed = s * 17 + fi * 3 + 7   # deterministic but varied
+
+            env_train = TradingEnv(train_df)
+            print(f"    Seed {s+1}/{n_seeds}  (seed={seed})")
+            agent, rewards_log, sharpe_log = train(
+                env_train,
+                n_episodes=n_episodes,
+                update_timestep=UPDATE_TIMESTEP,
+                seed=seed)
+            training_curves.append(rewards_log)
+
+            # Evaluate on unseen test data
+            env_test = TradingEnv(test_df)
+            m        = evaluate(agent, env_test)
+
+            for key in seed_metrics:
+                seed_metrics[key].append(m[key])
+
+            if m["sharpe_ratio"] > best_sharpe:
+                best_sharpe      = m["sharpe_ratio"]
+                best_history     = m["portfolio_history"]
+                best_rewards_log = rewards_log
+
+        # Aggregate across seeds for this fold
+        fold_agg = {}
+        for key, vals in seed_metrics.items():
+            a = np.array(vals)
+            fold_agg[f"{key}_mean"] = float(a.mean())
+            fold_agg[f"{key}_std"]  = float(a.std())
+            fold_agg[key]           = float(a.mean())
+
+        fold_agg["training_curves"]  = training_curves
+        fold_agg["best_history"]     = best_history
+        fold_agg["best_rewards_log"] = best_rewards_log
+        fold_agg["train_df"]         = train_df
+        fold_agg["test_df"]          = test_df
+
+        fold_results.append(fold_agg)
+        _print_fold_summary(fi+1, fold_agg)
+
+    # Aggregate across folds
+    agg = _aggregate_folds(fold_results)
+
+    # Print final summary
+    print(f"\n  AGGREGATE — {ticker} ({n_folds} folds × {n_seeds} seeds)")
+    print(f"  {'Metric':<22} {'Mean':>10} {'±Std':>10}")
+    print(f"  {'-'*44}")
+    for key, label, fmt in [
+        ("cumulative_return", "Cumulative Return", "{:.2%}"),
+        ("sharpe_ratio",      "Sharpe Ratio",      "{:.3f}"),
+        ("max_drawdown",      "Max Drawdown",      "{:.2%}"),
+    ]:
+        print(f"  {label:<22} "
+              f"{fmt.format(agg[key+'_mean']):>10}  "
+              f"±{fmt.format(agg[key+'_std']):>9}")
+
+    return {
+        "ticker":       ticker,
+        "folds":        fold_results,
+        "aggregate":    agg,
+        "features":     features,
+    }
+
+
+def _print_fold_summary(fold_n: int, fold_agg: dict):
+    print(f"\n    Fold {fold_n} test results (mean ± std across seeds):")
+    for key, label, fmt in [
+        ("cumulative_return", "Cum. Return", "{:.2%}"),
+        ("sharpe_ratio",      "Sharpe",      "{:.3f}"),
+        ("max_drawdown",      "Max DD",      "{:.2%}"),
+    ]:
+        mu = fold_agg[f"{key}_mean"]
+        sd = fold_agg[f"{key}_std"]
+        print(f"      {label:<14} {fmt.format(mu)} ± {fmt.format(sd)}")
+
+
+def _aggregate_folds(fold_results: list) -> dict:
+    keys = ["cumulative_return", "sharpe_ratio", "max_drawdown", "final_value"]
+    agg  = {}
+    for key in keys:
+        means = [f[f"{key}_mean"] for f in fold_results]
+        stds  = [f[f"{key}_std"]  for f in fold_results]
+        agg[f"{key}_mean"]       = float(np.mean(means))
+        agg[f"{key}_std"]        = float(np.mean(stds))
+        agg[key]                 = float(np.mean(means))
+        agg[f"{key}_fold_means"] = means
+    # Carry best portfolio history from the last fold
+    agg["best_history"]     = fold_results[-1]["best_history"]
+    agg["best_rewards_log"] = fold_results[-1]["best_rewards_log"]
+    agg["last_test_df"]     = fold_results[-1]["test_df"]
+    return agg
+
+
+# ---------------------------------------------------------------------------
+# Plotting
+# ---------------------------------------------------------------------------
+
+COLOURS = {"TSLA": "#3B82F6", "NVDA": "#22C55E", "GOOG": "#F59E0B"}
+
+
+def plot_all(all_results: dict, save_path: str = "training_results.png"):
+    n_tickers = len(all_results)
+    fig = plt.figure(figsize=(18, 5 * n_tickers), facecolor="#0F172A")
+    gs  = gridspec.GridSpec(n_tickers, 3, figure=fig,
+                            hspace=0.55, wspace=0.35)
+
+    for row, (ticker, res) in enumerate(all_results.items()):
+        agg    = res["aggregate"]
+        folds  = res["folds"]
+        colour = COLOURS.get(ticker, "#A78BFA")
+
+        # ── (A) Training reward curve (best seed, last fold) ──────────
+        ax1 = fig.add_subplot(gs[row, 0])
+        ax1.set_facecolor("#1E293B")
+        if agg["best_rewards_log"]:
+            sm = pd.Series(agg["best_rewards_log"]).rolling(5, min_periods=1).mean()
+            ax1.plot(sm.values, color=colour, lw=1.8)
+        ax1.set_title(f"{ticker} Training Reward", color="white", fontsize=10)
+        ax1.set_xlabel("Episode", color="white", fontsize=8)
+        ax1.set_ylabel("Reward", color="white", fontsize=8)
+        ax1.tick_params(colors="white", labelsize=7)
+        for sp in ax1.spines.values(): sp.set_color("#334155")
+
+        # ── (B) Test portfolio value (best seed, last fold) ────────────
+        ax2 = fig.add_subplot(gs[row, 1])
+        ax2.set_facecolor("#1E293B")
+        if agg["best_history"]:
+            ax2.plot(agg["best_history"], color=colour, lw=1.8,
+                     label="PPO (best seed)")
+            # Buy-and-hold reference on last test fold
+            test_prices = agg["last_test_df"]["close"].values
+            bh = 10_000.0 * test_prices / test_prices[0]
+            bh_x = np.linspace(0, len(agg["best_history"])-1, len(bh))
+            ax2.plot(bh_x, bh, color="#EF4444", ls="--", lw=1.3,
+                     label="Buy & Hold")
+        ax2.set_title(f"{ticker} Test Portfolio (Last Fold)",
+                      color="white", fontsize=10)
+        ax2.set_xlabel("Step", color="white", fontsize=8)
+        ax2.set_ylabel("Portfolio ($)", color="white", fontsize=8)
+        ax2.tick_params(colors="white", labelsize=7)
+        for sp in ax2.spines.values(): sp.set_color("#334155")
+        ax2.legend(facecolor="#1E293B", labelcolor="white", fontsize=8)
+
+        # ── (C) Sharpe per fold with seed std band ────────────────────
+        ax3 = fig.add_subplot(gs[row, 2])
+        ax3.set_facecolor("#1E293B")
+        fold_ns    = list(range(1, len(folds)+1))
+        fold_means = agg["sharpe_ratio_fold_means"]
+        fold_stds  = [f["sharpe_ratio_std"] for f in folds]
+        mu = np.array(fold_means); sd = np.array(fold_stds)
+        ax3.plot(fold_ns, mu, color=colour, lw=2.0, marker="o", markersize=6)
+        ax3.fill_between(fold_ns, mu-sd, mu+sd, color=colour, alpha=0.15)
+        ax3.axhline(0, color="#94A3B8", lw=0.5, ls=":")
+        ax3.set_title(f"{ticker} Sharpe per Fold (±1σ seeds)",
+                      color="white", fontsize=10)
+        ax3.set_xlabel("Fold", color="white", fontsize=8)
+        ax3.set_ylabel("Sharpe Ratio", color="white", fontsize=8)
+        ax3.set_xticks(fold_ns)
+        ax3.tick_params(colors="white", labelsize=7)
+        for sp in ax3.spines.values(): sp.set_color("#334155")
+
+    plt.suptitle(
+        f"PPO Trading Agent — No-Sentiment Baseline | Q4 2025\n"
+        f"Walk-forward {N_FOLDS} folds × {N_SEEDS} seeds",
+        color="white", fontsize=13, y=1.01)
+
+    fig.savefig(save_path, dpi=130, bbox_inches="tight",
+                facecolor=fig.get_facecolor())
+    plt.close(fig)
+    print(f"\nChart saved: {save_path}")
+
+
+# ---------------------------------------------------------------------------
+# Entry point
+# ---------------------------------------------------------------------------
+
+if __name__ == "__main__":
+    import pandas as pd   # needed for rolling in plot_all
+
+    all_results = {}
+    for ticker in TICKERS:
+        all_results[ticker] = run_walk_forward(
+            ticker,
+            n_folds    = N_FOLDS,
+            n_seeds    = N_SEEDS,
+            n_episodes = N_EPISODES,
+        )
+
+    # Cross-ticker summary
+    print(f"\n\n{'='*70}")
+    print("  CROSS-TICKER SUMMARY  (No-Sentiment Baseline)")
+    print(f"{'='*70}")
+    print(f"  {'Ticker':<8} {'Cum. Ret (mean)':>16} "
+          f"{'Sharpe (mean)':>14} {'Max DD (mean)':>14}")
+    print(f"  {'-'*56}")
+    for ticker, res in all_results.items():
+        m = res["aggregate"]
+        print(f"  {ticker:<8} "
+              f"{m['cumulative_return']:>+10.2%} ±{m['cumulative_return_std']:.2%}  "
+              f"{m['sharpe_ratio']:>8.3f} ±{m['sharpe_ratio_std']:.3f}  "
+              f"{m['max_drawdown']:>8.2%} ±{m['max_drawdown_std']:.2%}")
+
+    plot_all(all_results, save_path="training_results.png")

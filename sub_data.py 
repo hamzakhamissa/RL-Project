@@ -1,63 +1,257 @@
 import numpy as np
 import pandas as pd
-
-def generate_prices(
-    S0: float = 100.0,
-    mu: float = 0.0003,      # daily drift
-    sigma: float = 0.015,    # daily volatility
-    n_steps: int = 500,
-    seed: int = 42
-) -> pd.Series:
+from pathlib import Path
+from typing import List, Tuple
+ 
+# ---------------------------------------------------------------------------
+# Paths — adjust DATA_DIR if your CSV files live elsewhere
+# ---------------------------------------------------------------------------
+DATA_DIR = Path(__file__).parent          # same folder as this script
+ 
+TICKER_FILES = {
+    "TSLA": DATA_DIR / "TSLA_q4_2025.csv",
+    "NVDA": DATA_DIR / "NVDA_q4_2025.csv",
+    "GOOG": DATA_DIR / "GOOG_q4_2025.csv",
+}
+ 
+# Feature columns expected by TradingEnv
+# Must stay in sync with enviorment.py  feat_cols list
+FEAT_COLS = ["returns", "sma_ratio", "volatility", "momentum"]
+ 
+# Window used for rolling indicators
+INDICATOR_WINDOW = 10
+ 
+ 
+# ---------------------------------------------------------------------------
+# 1.  Load raw price data
+# ---------------------------------------------------------------------------
+ 
+def load_ticker(ticker: str) -> pd.Series:
     """
-    Geometric Brownian Motion price series.
-    Swap this function for yf.download() when real data is ready.
+    Load closing prices for one ticker from the Q4 2025 CSV.
+ 
+    Parameters
+    ----------
+    ticker : str
+        One of  'TSLA', 'NVDA', 'GOOG'
+ 
+    Returns
+    -------
+    pd.Series
+        Closing prices indexed by date, named 'close'.
     """
-    np.random.seed(seed)
-    dt = 1
-    shocks = np.random.normal(
-        (mu - 0.5 * sigma**2) * dt,
-        sigma * np.sqrt(dt),
-        n_steps
-    )
-    log_returns = np.cumsum(shocks)
-    prices = S0 * np.exp(log_returns)
-    return pd.Series(prices, name="close")
-
-
-def add_regime_shocks(
-    prices: pd.Series,
-    prob: float = 0.02,
-    magnitude: float = 0.03,
-    seed: int = 0
-) -> pd.Series:
+    ticker = ticker.upper()
+    if ticker not in TICKER_FILES:
+        raise ValueError(
+            f"Unknown ticker '{ticker}'. "
+            f"Available: {list(TICKER_FILES.keys())}"
+        )
+ 
+    path = TICKER_FILES[ticker]
+    if not path.exists():
+        raise FileNotFoundError(
+            f"CSV not found: {path}\n"
+            f"Make sure the CSV files are in the same folder as sub_data.py"
+        )
+ 
+    df = pd.read_csv(path, parse_dates=["Date"])
+    df = df.sort_values("Date").reset_index(drop=True)
+    prices = df.set_index("Date")["close"].rename("close")
+    return prices
+ 
+ 
+# ---------------------------------------------------------------------------
+# 2.  Feature engineering  (same feature names as the original sub_data.py)
+# ---------------------------------------------------------------------------
+ 
+def _rsi(series: pd.Series, period: int = 14) -> pd.Series:
+    """Relative Strength Index."""
+    delta = series.diff()
+    gain  = delta.clip(lower=0).rolling(period).mean()
+    loss  = (-delta.clip(upper=0)).rolling(period).mean()
+    rs    = gain / loss.replace(0.0, np.nan)
+    return 100 - (100 / (1 + rs))
+ 
+ 
+def compute_features(prices: pd.Series,
+                     window: int = INDICATOR_WINDOW) -> pd.DataFrame:
     """
-    Simulate news-event-like price shocks.
-    Each step has `prob` chance of a sudden +/- move.
-    Replace with real news alpha signals later.
+    Build a feature DataFrame from a closing-price Series.
+ 
+    Produced columns  (match TradingEnv.feat_cols):
+        returns    — daily pct change
+        sma_ratio  — price / rolling-mean  (momentum proxy)
+        volatility — rolling std of returns
+        momentum   — price / price[t-window] - 1
+ 
+    Additional columns kept for reference / plotting:
+        close, rsi_14, macd
+ 
+    The first ~window rows that contain NaN are dropped.
+ 
+    Parameters
+    ----------
+    prices : pd.Series  (named 'close')
+    window : int        rolling window for SMA / vol / momentum
+ 
+    Returns
+    -------
+    pd.DataFrame  with a clean RangeIndex
     """
-    np.random.seed(seed)
-    prices = prices.copy().values
-    for i in range(1, len(prices)):
-        if np.random.random() < prob:
-            direction = np.random.choice([-1, 1])
-            prices[i:] *= (1 + direction * magnitude)
-    return pd.Series(prices, name="close")
-
-
-def compute_features(prices: pd.Series, window: int = 10) -> pd.DataFrame:
+    df = pd.DataFrame({"close": prices.values},
+                      index=prices.index if hasattr(prices, "index") else None)
+ 
+    df["returns"]    = df["close"].pct_change()
+    df["sma_ratio"]  = df["close"] / df["close"].rolling(window).mean()
+    df["volatility"] = df["returns"].rolling(window).std()
+    df["momentum"]   = df["close"] / df["close"].shift(window) - 1
+ 
+    # Extra indicators (not required by TradingEnv but useful for inspection)
+    df["rsi_14"] = _rsi(df["close"], 14)
+    ema12        = df["close"].ewm(span=12, adjust=False).mean()
+    ema26        = df["close"].ewm(span=26, adjust=False).mean()
+    df["macd"]   = (ema12 - ema26) / df["close"]
+ 
+    df = df.dropna().reset_index(drop=True)
+    return df
+ 
+ 
+# ---------------------------------------------------------------------------
+# 3.  Combined loader  (one-stop shop used by train.py / TradingEnv)
+# ---------------------------------------------------------------------------
+ 
+def get_env_data(ticker: str,
+                 window: int = INDICATOR_WINDOW
+                 ) -> Tuple[pd.DataFrame, np.ndarray]:
     """
-    Technical features as state space (no sentiment).
+    Load real CSV data and return everything TradingEnv needs.
+ 
+    Returns
+    -------
+    features : pd.DataFrame
+        Columns include 'close' + all FEAT_COLS.
+    prices   : np.ndarray
+        Raw closing prices aligned with features rows.
     """
-    df = pd.DataFrame({"close": prices})
-    df["returns"]   = df["close"].pct_change()
-    df["sma_ratio"] = df["close"] / df["close"].rolling(window).mean()
-    df["volatility"]= df["returns"].rolling(window).std()
-    df["momentum"]  = df["close"] / df["close"].shift(window) - 1
-    return df.dropna().reset_index(drop=True)
-
-
+    prices   = load_ticker(ticker)
+    features = compute_features(prices, window=window)
+    return features, features["close"].values
+ 
+ 
+# ---------------------------------------------------------------------------
+# 4.  Train / test split helpers
+# ---------------------------------------------------------------------------
+ 
+def train_test_split(df: pd.DataFrame,
+                     train_ratio: float = 0.80
+                     ) -> Tuple[pd.DataFrame, pd.DataFrame]:
+    """
+    Simple time-ordered train/test split.
+ 
+    Parameters
+    ----------
+    df          : feature DataFrame (output of compute_features)
+    train_ratio : fraction of rows used for training  (default 0.80)
+ 
+    Returns
+    -------
+    (train_df, test_df) — both reset-indexed, close_norm re-anchored
+    """
+    n          = len(df)
+    split_idx  = int(n * train_ratio)
+    train_df   = _renorm(df.iloc[:split_idx])
+    test_df    = _renorm(df.iloc[split_idx:])
+    return train_df, test_df
+ 
+ 
+def walk_forward_folds(df: pd.DataFrame,
+                       n_folds:     int   = 3,
+                       train_ratio: float = 0.80
+                       ) -> List[Tuple[pd.DataFrame, pd.DataFrame]]:
+    """
+    Expanding-window walk-forward cross-validation folds.
+ 
+    Each fold slides the test window one step forward while the training
+    window grows from the same starting point (anchored-start WF-CV).
+ 
+    Example  (50 rows, 3 folds, 80/20):
+        Fold 0 : train rows  0–40, test rows 41–43
+        Fold 1 : train rows  0–43, test rows 44–46
+        Fold 2 : train rows  0–46, test rows 47–49
+ 
+    Returns
+    -------
+    list of (train_df, test_df)  tuples, each reset-indexed
+    """
+    n              = len(df)
+    total_test     = max(int(n * (1 - train_ratio)), 1)
+    fold_test_size = max(total_test // n_folds, 2)
+    first_test_start = n - fold_test_size * n_folds
+ 
+    folds = []
+    for f in range(n_folds):
+        test_start = first_test_start + f * fold_test_size
+        test_end   = min(test_start + fold_test_size, n)
+ 
+        train_slice = _renorm(df.iloc[:test_start])
+        test_slice  = _renorm(df.iloc[test_start:test_end])
+ 
+        if len(train_slice) < 10 or len(test_slice) < 2:
+            continue
+ 
+        folds.append((train_slice, test_slice))
+ 
+    return folds
+ 
+ 
+def _renorm(df: pd.DataFrame) -> pd.DataFrame:
+    """Re-anchor close_norm / sma_ratio to the start of this slice."""
+    df = df.copy().reset_index(drop=True)
+    if len(df) == 0:
+        return df
+    first_close = df["close"].iloc[0]
+    if first_close != 0:
+        # sma_ratio already relative; renorm close for consistent scale
+        df["returns"]   = df["close"].pct_change().fillna(0)
+        df["sma_ratio"] = df["close"] / df["close"].rolling(
+            min(INDICATOR_WINDOW, len(df))).mean()
+        df["sma_ratio"] = df["sma_ratio"].fillna(1.0)
+    return df
+ 
+ 
+# ---------------------------------------------------------------------------
+# 5.  Multi-ticker loader  (optional, for cross-asset training)
+# ---------------------------------------------------------------------------
+ 
+def load_all_tickers(window: int = INDICATOR_WINDOW
+                     ) -> dict:
+    """
+    Load features for all three tickers.
+ 
+    Returns
+    -------
+    dict  { 'TSLA': df, 'NVDA': df, 'GOOG': df }
+    """
+    return {t: compute_features(load_ticker(t), window)
+            for t in TICKER_FILES}
+ 
+ 
+# ---------------------------------------------------------------------------
+# 6.  Quick sanity check
+# ---------------------------------------------------------------------------
+ 
 if __name__ == "__main__":
-    prices = generate_prices()
-    prices = add_regime_shocks(prices)
-    features = compute_features(prices)
-    print(features.tail())
+    for ticker in ("TSLA", "NVDA", "GOOG"):
+        features, prices = get_env_data(ticker)
+        train_df, test_df = train_test_split(features, train_ratio=0.80)
+        folds = walk_forward_folds(features, n_folds=3)
+ 
+        print(f"\n{ticker}")
+        print(f"  Total rows  : {len(features)}")
+        print(f"  Train/test  : {len(train_df)} / {len(test_df)}")
+        print(f"  WF folds    : {len(folds)}")
+        for i, (tr, te) in enumerate(folds):
+            print(f"    Fold {i+1}: train={len(tr)}  test={len(te)}")
+        print(f"  Columns     : {list(features.columns)}")
+        print(features[["close","returns","sma_ratio","volatility","momentum"]].tail(3).to_string())
+ 
