@@ -1,0 +1,63 @@
+import numpy as np
+import pandas as pd
+
+def generate_prices(
+    S0: float = 100.0,
+    mu: float = 0.0003,      # daily drift
+    sigma: float = 0.015,    # daily volatility
+    n_steps: int = 500,
+    seed: int = 42
+) -> pd.Series:
+    """
+    Geometric Brownian Motion price series.
+    Swap this function for yf.download() when real data is ready.
+    """
+    np.random.seed(seed)
+    dt = 1
+    shocks = np.random.normal(
+        (mu - 0.5 * sigma**2) * dt,
+        sigma * np.sqrt(dt),
+        n_steps
+    )
+    log_returns = np.cumsum(shocks)
+    prices = S0 * np.exp(log_returns)
+    return pd.Series(prices, name="close")
+
+
+def add_regime_shocks(
+    prices: pd.Series,
+    prob: float = 0.02,
+    magnitude: float = 0.03,
+    seed: int = 0
+) -> pd.Series:
+    """
+    Simulate news-event-like price shocks.
+    Each step has `prob` chance of a sudden +/- move.
+    Replace with real news alpha signals later.
+    """
+    np.random.seed(seed)
+    prices = prices.copy().values
+    for i in range(1, len(prices)):
+        if np.random.random() < prob:
+            direction = np.random.choice([-1, 1])
+            prices[i:] *= (1 + direction * magnitude)
+    return pd.Series(prices, name="close")
+
+
+def compute_features(prices: pd.Series, window: int = 10) -> pd.DataFrame:
+    """
+    Technical features as state space (no sentiment).
+    """
+    df = pd.DataFrame({"close": prices})
+    df["returns"]   = df["close"].pct_change()
+    df["sma_ratio"] = df["close"] / df["close"].rolling(window).mean()
+    df["volatility"]= df["returns"].rolling(window).std()
+    df["momentum"]  = df["close"] / df["close"].shift(window) - 1
+    return df.dropna().reset_index(drop=True)
+
+
+if __name__ == "__main__":
+    prices = generate_prices()
+    prices = add_regime_shocks(prices)
+    features = compute_features(prices)
+    print(features.tail())

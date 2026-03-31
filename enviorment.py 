@@ -1,0 +1,69 @@
+import numpy as np
+import gymnasium as gym
+from gymnasium import spaces
+
+class TradingEnv(gym.Env):
+    """
+    Single-asset day trading environment.
+    State  : [returns, sma_ratio, volatility, momentum, position]
+    Actions: 0=hold, 1=buy, 2=sell
+    Reward : change in portfolio value (PnL)
+    """
+
+    def __init__(self, features: pd.DataFrame, initial_cash: float = 10_000):
+        super().__init__()
+        self.features     = features
+        self.prices       = features["close"].values
+        self.feat_cols    = ["returns", "sma_ratio", "volatility", "momentum"]
+        self.initial_cash = initial_cash
+
+        n_features = len(self.feat_cols) + 1  # +1 for position
+        self.observation_space = spaces.Box(
+            low=-np.inf, high=np.inf,
+            shape=(n_features,), dtype=np.float32
+        )
+        self.action_space = spaces.Discrete(3)  # hold / buy / sell
+        self.reset()
+
+    def _get_obs(self):
+        row = self.features.iloc[self.step_idx][self.feat_cols].values
+        return np.append(row, self.position).astype(np.float32)
+
+    def reset(self, seed=None):
+        super().reset(seed=seed)
+        self.step_idx  = 0
+        self.cash      = self.initial_cash
+        self.position  = 0        # shares held
+        self.portfolio = self.initial_cash
+        self.history   = []
+        return self._get_obs(), {}
+
+    def step(self, action):
+        price = self.prices[self.step_idx]
+
+        # Execute action
+        if action == 1 and self.cash >= price:   # buy 1 share
+            self.position += 1
+            self.cash     -= price
+        elif action == 2 and self.position > 0:  # sell 1 share
+            self.position -= 1
+            self.cash     += price
+
+        # Move to next step
+        self.step_idx += 1
+        done = self.step_idx >= len(self.features) - 1
+
+        new_price     = self.prices[self.step_idx]
+        new_portfolio = self.cash + self.position * new_price
+        reward        = new_portfolio - self.portfolio  # PnL reward
+        self.portfolio = new_portfolio
+        self.history.append(self.portfolio)
+
+        return self._get_obs(), reward, done, False, {}
+
+    def sharpe_ratio(self) -> float:
+        """Evaluate agent quality after an episode."""
+        returns = np.diff(self.history) / np.array(self.history[:-1])
+        if returns.std() == 0:
+            return 0.0
+        return (returns.mean() / returns.std()) * np.sqrt(252)

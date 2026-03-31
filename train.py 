@@ -1,0 +1,54 @@
+import matplotlib.pyplot as plt
+
+def train(n_episodes=100, update_timestep=2000):
+    # --- Data & Environment ---
+    prices = add_regime_shocks(generate_prices())
+    features = compute_features(prices) # Ensure compute_features includes 'sentiment' [cite: 9]
+    env = TradingEnv(features)
+    
+    agent = PPOAgent(
+        state_dim = env.observation_space.shape[0],
+        n_actions = env.action_space.n
+    )
+
+    memory = {'states': [], 'actions': [], 'logprobs': [], 'rewards': [], 'is_terminals': []}
+    timestep = 0
+    rewards_log, sharpe_log = [], []
+
+    for ep in range(n_episodes):
+        state, _ = env.reset()
+        ep_reward = 0
+        
+        while True:
+            timestep += 1
+            # Select action using current policy
+            action, log_prob = agent.act(state)
+            
+            next_state, reward, done, _, _ = env.step(action)
+            
+            # Save to memory for update
+            memory['states'].append(state)
+            memory['actions'].append(action)
+            memory['logprobs'].append(log_prob)
+            memory['rewards'].append(reward)
+            memory['is_terminals'].append(done)
+            
+            state = next_state
+            ep_reward += reward
+            
+            # Update agent after update_timestep
+            if timestep % update_timestep == 0:
+                agent.update(memory)
+                memory = {k: [] for k in memory} # Clear memory
+
+            if done:
+                break
+        
+        sharpe = env.sharpe_ratio()
+        rewards_log.append(ep_reward)
+        sharpe_log.append(sharpe)
+        
+        if ep % 10 == 0:
+            print(f"Episode {ep} | Reward: {ep_reward:.2f} | Sharpe: {sharpe:.3f}")
+
+    return agent, rewards_log, sharpe_log
