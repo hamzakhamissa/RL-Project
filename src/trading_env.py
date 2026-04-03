@@ -39,6 +39,10 @@ class TradingEnv(gym.Env):
         volatility_penalty: float = 0.0,
         volatility_window: int = 5,
         allow_short: bool = False,
+        
+        # add volitility threshold and switch for volatility gate
+        use_volatility_gate: bool = False,
+        vol_threshold: float | None = None,
     ):
         super().__init__()
 
@@ -56,6 +60,10 @@ class TradingEnv(gym.Env):
         self.volatility_penalty = volatility_penalty
         self.volatility_window = volatility_window
         self.allow_short = allow_short
+        
+        # added volatility threshold settings
+        self.use_volatility_gate = use_volatility_gate
+        self.vol_threshold = vol_threshold
 
         self.feature_cols = MARKET_FEATURES + PRICE_FEATURES
         if self.sentiment_feature_set == "basic":
@@ -102,6 +110,14 @@ class TradingEnv(gym.Env):
         return self._get_obs(), {}
 
     def step(self, action):
+        vol = self.data.iloc[self._step]["rolling_volatility_5d"]
+
+        # added: apply penalty if volatility exceeds threshold
+        if self.volatility_penalty > 0 and self.vol_threshold is not None:
+            if vol > self.vol_threshold:
+                excess_vol = vol - self.vol_threshold
+                reward -= self.volatility_penalty * excess_vol
+        
         assert 0 <= action <= (3 if self.allow_short else 2), f"Invalid action {action}"
 
         price = self._current_price()
@@ -195,6 +211,9 @@ class TradingEnv(gym.Env):
             'reward':          reward,
             'daily_return':    daily_return,
             'action':          action,
+            
+            # added volatility
+            'volatility':      vol,
         })
 
         obs = self._get_obs()
@@ -267,7 +286,19 @@ def make_envs(
     t = daily_df[daily_df['ticker'] == ticker].copy()
     train = t[t['date'] <= train_cutoff]
     test  = t[t['date'] >  train_cutoff]
-    env_kwargs = env_kwargs or {}
+    
+    # added computing volatility threshold from TRAIN data
+    sub = train.dropna(subset=["rolling_volatility_5d"])
+    
+    vol_threshold = None
+    if not sub.empty:
+        vol_threshold = sub["rolling_volatility_5d"].quantile(
+            env_kwargs.get("vol_threshold_quantile", 0.3)
+        ) 
+    
+    env_kwargs = (env_kwargs or {}).copy()
+    env_kwargs["vol_threshold"] = vol_threshold
+     
 
     envs = {
         'train_price':               TradingEnv(train, use_sentiment=False, **env_kwargs),
