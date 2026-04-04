@@ -110,14 +110,6 @@ class TradingEnv(gym.Env):
         return self._get_obs(), {}
 
     def step(self, action):
-        vol = self.data.iloc[self._step]["rolling_volatility_5d"]
-
-        # added: apply penalty if volatility exceeds threshold
-        if self.volatility_penalty > 0 and self.vol_threshold is not None:
-            if vol > self.vol_threshold:
-                excess_vol = vol - self.vol_threshold
-                reward -= self.volatility_penalty * excess_vol
-        
         assert 0 <= action <= (3 if self.allow_short else 2), f"Invalid action {action}"
 
         price = self._current_price()
@@ -200,6 +192,14 @@ class TradingEnv(gym.Env):
         if self.volatility_penalty > 0 and len(self._returns) >= 2:
             recent = self._returns[-self.volatility_window :]
             reward -= self.volatility_penalty * float(np.std(recent))
+            
+        vol = self.data.iloc[self._step]["rolling_volatility_5d"]
+
+        # added: apply penalty if volatility exceeds threshold
+        if self.volatility_penalty > 0 and self.vol_threshold is not None:
+            if vol > self.vol_threshold:
+                excess_vol = vol - self.vol_threshold
+                reward -= self.volatility_penalty * excess_vol
 
         self._history.append({
             'step':            self._step,
