@@ -1,0 +1,57 @@
+{
+  "total_rows": 2456,
+  "rows_with_full_text": 82,
+  "rows_high_tier": 128,
+  "by_ticker": {
+    "GOOGL": {
+      "rows": 806,
+      "rows_with_full_text": 82,
+      "high_tier_rows": 47,
+      "top_sources": {
+        "Yahoo": 572,
+        "SeekingAlpha": 109,
+        "Benzinga": 68,
+        "CNBC": 47,
+        "DowJones": 10
+      }
+    },
+    "NVDA": {
+      "rows": 835,
+      "rows_with_full_text": 0,
+      "high_tier_rows": 44,
+      "top_sources": {
+        "Yahoo": 531,
+        "SeekingAlpha": 133,
+        "Benzinga": 127,
+        "CNBC": 44
+      }
+    },
+    "TSLA": {
+      "rows": 815,
+      "rows_with_full_text": 0,
+      "high_tier_rows": 37,
+      "top_sources": {
+        "Yahoo": 584,
+        "Benzinga": 110,
+        "SeekingAlpha": 63,
+        "CNBC": 37,
+        "DowJones": 12,
+        "MarketWatch": 9
+      }
+    }
+  },
+  "date_range": {
+    "start": "2020-06-12",
+    "end": "2025-12-31"
+  },
+  "symbols": [
+    "GOOGL",
+    "NVDA",
+    "TSLA"
+  ],
+  "outputs": {
+    "csv": "q4_article_dump_fulltext/raw_articles_q4_2025.csv",
+    "jsonl": "q4_article_dump_fulltext/raw_articles_q4_2025.jsonl",
+    "summary": "q4_article_dump_fulltext/collection_summary.json"
+  }
+}
