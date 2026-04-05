@@ -5,6 +5,12 @@ oct2025_stocks.jsonl
 .env
 .env.*
 
+# LLM experiment outputs (large binaries and raw data)
+llm/models/
+llm/data/
+llm/files/
+llm/results/*.png
+
 # Virtual environments
 .venv/
 venv/

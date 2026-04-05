@@ -191,11 +191,9 @@ class TradingEnv(gym.Env):
             
         vol = self.data.iloc[self._step]["rolling_volatility_5d"]
 
-        # added: apply penalty if volatility exceeds threshold
-        if self.volatility_penalty > 0 and self.vol_threshold is not None:
-            if vol > self.vol_threshold:
-                excess_vol = vol - self.vol_threshold
-                reward -= self.volatility_penalty * (excess_vol / (self.vol_threshold + 1e-8)) # add 1e-8 to prevent divison by 0 cases
+        if self.use_volatility_gate and self.vol_threshold is not None and vol > self.vol_threshold:
+            excess_vol = vol - self.vol_threshold
+            reward -= self.volatility_penalty * (excess_vol / (self.vol_threshold + 1e-8))
 
         self._history.append({
             'step':            self._step,
@@ -286,13 +284,12 @@ def make_envs(
     # added computing volatility threshold from TRAIN data
     sub = train.dropna(subset=["rolling_volatility_5d"])
     
+    env_kwargs = (env_kwargs or {}).copy()
+    vol_threshold_quantile = env_kwargs.pop("vol_threshold_quantile", 0.3)
+
     vol_threshold = None
     if not sub.empty:
-        vol_threshold = sub["rolling_volatility_5d"].quantile(
-            env_kwargs.get("vol_threshold_quantile", 0.3)
-        ) 
-    
-    env_kwargs = (env_kwargs or {}).copy()
+        vol_threshold = sub["rolling_volatility_5d"].quantile(vol_threshold_quantile)
     env_kwargs["vol_threshold"] = vol_threshold
      
 

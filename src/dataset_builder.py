@@ -275,8 +275,7 @@ def build_dataset(paths: DatasetPaths, ticker_file_map: dict[str, Path]) -> tupl
         "published_at_et",
         "news_session",
         "effective_date",
-        # "sentiment_vader",
-        "sentiment_finBERT",
+        "sentiment_vader",
     ]
     article_export = aligned_articles[article_export_cols].copy()
     article_export = article_export.rename(columns={"effective_date": "aligned_trading_date"})
