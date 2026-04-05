@@ -188,10 +188,6 @@ class TradingEnv(gym.Env):
                 / (self._peak_portfolio_value + 1e-8),
             )
             reward -= self.drawdown_penalty * drawdown
-
-        if self.volatility_penalty > 0 and len(self._returns) >= 2:
-            recent = self._returns[-self.volatility_window :]
-            reward -= self.volatility_penalty * float(np.std(recent))
             
         vol = self.data.iloc[self._step]["rolling_volatility_5d"]
 
@@ -199,7 +195,7 @@ class TradingEnv(gym.Env):
         if self.volatility_penalty > 0 and self.vol_threshold is not None:
             if vol > self.vol_threshold:
                 excess_vol = vol - self.vol_threshold
-                reward -= self.volatility_penalty * excess_vol
+                reward -= self.volatility_penalty * (excess_vol / (self.vol_threshold + 1e-8)) # add 1e-8 to prevent divison by 0 cases
 
         self._history.append({
             'step':            self._step,
