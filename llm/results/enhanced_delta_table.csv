@@ -1,0 +1,7 @@
+ticker,algo,enhanced_vs_basic_return_pp,enhanced_vs_basic_sharpe,enhanced_vs_price_return_pp,enhanced_vs_price_sharpe
+NVDA,PPO,4.388,7.726,5.499,8.024
+NVDA,DQN,-0.794,-1.495,0.071,-0.754
+GOOG,PPO,-0.755,-1.081,-0.753,-1.079
+GOOG,DQN,0.401,0.469,2.499,3.39
+TSLA,PPO,-1.167,-2.02,-5.087,-3.836
+TSLA,DQN,2.091,1.49,4.004,0.536
