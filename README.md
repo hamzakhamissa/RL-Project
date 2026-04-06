@@ -1,6 +1,8 @@
 # Reinforcement Learning Trading Project
 
-This project trains and evaluates RL trading agents on Q4 2025 data for `NVDA`, `GOOG`, and `TSLA`.
+This project trains and evaluates RL trading agents on Q3-Q4 2025 data for `NVDA`, `GOOG`, and `TSLA`.
+
+The current dataset spans July 1, 2025 through December 31, 2025. Article coverage is split across 2,181 Q3 articles and 2,644 Q4 articles.
 
 ## Setup
 

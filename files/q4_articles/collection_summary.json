@@ -1,57 +1,61 @@
 {
-  "total_rows": 2456,
-  "rows_with_full_text": 82,
+  "total_rows": 4829,
+  "rows_with_full_text": 0,
   "rows_high_tier": 128,
   "by_ticker": {
     "GOOGL": {
-      "rows": 806,
-      "rows_with_full_text": 82,
-      "high_tier_rows": 47,
+      "rows": 1594,
+      "rows_with_full_text": 0,
+      "high_tier_rows": 45,
       "top_sources": {
-        "Yahoo": 572,
-        "SeekingAlpha": 109,
-        "Benzinga": 68,
-        "CNBC": 47,
-        "DowJones": 10
+        "Yahoo": 1160,
+        "SeekingAlpha": 227,
+        "Benzinga": 122,
+        "CNBC": 45,
+        "MarketWatch": 24,
+        "DowJones": 16
       }
     },
     "NVDA": {
-      "rows": 835,
+      "rows": 1660,
       "rows_with_full_text": 0,
       "high_tier_rows": 44,
       "top_sources": {
-        "Yahoo": 531,
-        "SeekingAlpha": 133,
-        "Benzinga": 127,
-        "CNBC": 44
+        "Yahoo": 1077,
+        "SeekingAlpha": 309,
+        "Benzinga": 204,
+        "CNBC": 44,
+        "MarketWatch": 19,
+        "DowJones": 4,
+        "Finnhub": 3
       }
     },
     "TSLA": {
-      "rows": 815,
+      "rows": 1575,
       "rows_with_full_text": 0,
-      "high_tier_rows": 37,
+      "high_tier_rows": 39,
       "top_sources": {
-        "Yahoo": 584,
-        "Benzinga": 110,
-        "SeekingAlpha": 63,
-        "CNBC": 37,
-        "DowJones": 12,
-        "MarketWatch": 9
+        "Yahoo": 1108,
+        "Benzinga": 203,
+        "SeekingAlpha": 151,
+        "DowJones": 40,
+        "CNBC": 39,
+        "MarketWatch": 34
       }
     }
   },
   "date_range": {
-    "start": "2020-06-12",
+    "start": "2025-07-01",
     "end": "2025-12-31"
   },
   "symbols": [
-    "GOOGL",
     "NVDA",
+    "GOOGL",
     "TSLA"
   ],
   "outputs": {
-    "csv": "q4_article_dump_fulltext/raw_articles_q4_2025.csv",
-    "jsonl": "q4_article_dump_fulltext/raw_articles_q4_2025.jsonl",
-    "summary": "q4_article_dump_fulltext/collection_summary.json"
+    "csv": "/Users/hamzakhamissa/Desktop/CS4453/Project/files/q4_articles/raw_articles_q4_2025.csv",
+    "jsonl": "/Users/hamzakhamissa/Desktop/CS4453/Project/files/q4_articles/raw_articles_q4_2025.jsonl",
+    "summary": "/Users/hamzakhamissa/Desktop/CS4453/Project/files/q4_articles/collection_summary.json"
   }
 }

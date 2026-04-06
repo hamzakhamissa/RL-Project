@@ -259,7 +259,10 @@ def build_dataset(paths: DatasetPaths, ticker_file_map: dict[str, Path]) -> tupl
 
     articles = pd.read_csv(paths.articles_csv)
     articles = articles.copy()
-    articles = articles[pd.to_datetime(articles["published_at_utc"], utc=True) >= pd.Timestamp("2025-10-01", tz="UTC")]
+    min_market_date = pd.Timestamp(market["date"].min()).tz_localize("UTC")
+    articles = articles[
+        pd.to_datetime(articles["published_at_utc"], utc=True) >= min_market_date
+    ]
     articles = score_articles(articles)
     aligned_articles = align_articles_to_sessions(articles, market[["ticker", "date"]])
     daily_sentiment = aggregate_sentiment_features(aligned_articles)

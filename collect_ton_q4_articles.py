@@ -517,7 +517,7 @@ def parse_args():
     p = argparse.ArgumentParser()
     p.add_argument("--input-csv", help="Use an existing CSV as the input article list instead of fetching")
     p.add_argument("--symbols", nargs="+", default=["NVDA", "GOOGL", "TSLA"])
-    p.add_argument("--start", default="2025-10-01")
+    p.add_argument("--start", default="2025-07-01")
     p.add_argument("--end", default="2025-12-31")
     p.add_argument("--outdir", default="q4_article_dump")
     p.add_argument("--use-gdelt", action="store_true", help="Add broader GDELT search results")
