@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import os
 from pathlib import Path
 
 import numpy as np
@@ -58,6 +59,7 @@ def compute_market_features(df: pd.DataFrame) -> pd.DataFrame:
 
 
 def score_articles(articles: pd.DataFrame) -> pd.DataFrame:
+    """Score articles with VADER. Adds a 'sentiment_vader' column (-1 to +1 continuous)."""
     analyzer = SentimentIntensityAnalyzer()
     result = articles.copy()
 
@@ -67,6 +69,64 @@ def score_articles(articles: pd.DataFrame) -> pd.DataFrame:
         return analyzer.polarity_scores(f"{headline}. {summary}")["compound"]
 
     result["sentiment_vader"] = result.apply(score_row, axis=1)
+    return result
+
+
+def score_articles_finbert(articles: pd.DataFrame, batch_size: int = 16) -> pd.DataFrame:
+    """Score articles with FinBERT. Adds a 'sentiment_vader' column mapped to
+    +1 (positive), 0 (neutral), -1 (negative) so downstream aggregation is identical."""
+    try:
+        import torch
+        from transformers import AutoTokenizer, AutoModelForSequenceClassification
+    except ImportError as e:
+        raise ImportError("transformers and torch are required for FinBERT scoring") from e
+
+    model_name = os.environ.get("FINBERT_MODEL", "yiyanghkust/finbert-tone")
+
+    try:
+        tokenizer = AutoTokenizer.from_pretrained(model_name, local_files_only=True)
+        fb_model = AutoModelForSequenceClassification.from_pretrained(
+            model_name,
+            local_files_only=True,
+        )
+    except Exception as e:
+        raise RuntimeError(
+            "FinBERT model is not available locally. Download the Hugging Face model "
+            f"'{model_name}' first or set FINBERT_MODEL to a local model directory. "
+            f"Original error: {e}"
+        ) from e
+
+    requested_device = os.environ.get("FINBERT_DEVICE", "").strip().lower()
+    if requested_device:
+        device = torch.device(requested_device)
+    elif torch.backends.mps.is_available():
+        device = torch.device("mps")
+    elif torch.cuda.is_available():
+        device = torch.device("cuda")
+    else:
+        device = torch.device("cpu")
+
+    fb_model.to(device)
+    fb_model.eval()
+
+    # FinBERT-tone: label 0 = neutral, 1 = positive, 2 = negative
+    label_to_score = {0: 0, 1: 1, 2: -1}
+
+    result = articles.copy()
+    texts = (result["headline"].fillna("") + ". " + result["summary"].fillna("")).tolist()
+    scores = []
+
+    for i in range(0, len(texts), batch_size):
+        batch = texts[i : i + batch_size]
+        inputs = tokenizer(
+            batch, return_tensors="pt", padding=True, truncation=True, max_length=512
+        ).to(device)
+        with torch.no_grad():
+            logits = fb_model(**inputs).logits
+            preds = torch.argmax(logits, dim=-1).cpu().tolist()
+        scores.extend(label_to_score[p] for p in preds)
+
+    result["sentiment_vader"] = scores
     return result
 
 
@@ -216,20 +276,15 @@ def merge_market_and_sentiment(
     fill_cols = [col for col in ENHANCED_SENTIMENT_COLUMNS if col in daily.columns]
     daily[fill_cols] = daily[fill_cols].fillna(0.0)
     daily = daily.sort_values(["ticker", "date"]).reset_index(drop=True)
-
-    def add_lags(group: pd.DataFrame) -> pd.DataFrame:
-        group = group.copy()
-        group["article_count_change_1d"] = group["article_count"] - group["article_count"].shift(1)
-        group["sentiment_mean_change_1d"] = (
-            group["sentiment_mean"] - group["sentiment_mean"].shift(1)
-        )
-        group["sentiment_mean_lag_1d"] = group["sentiment_mean"].shift(1)
-        group["sentiment_mean_lag_3d"] = group["sentiment_mean"].shift(3)
-        group["sentiment_abs_mean_lag_1d"] = group["sentiment_abs_mean"].shift(1)
-        group["sentiment_std_lag_1d"] = group["sentiment_std"].shift(1)
-        return group
-
-    daily = daily.groupby("ticker", group_keys=False).apply(add_lags)
+    grouped = daily.groupby("ticker")
+    daily["article_count_change_1d"] = daily["article_count"] - grouped["article_count"].shift(1)
+    daily["sentiment_mean_change_1d"] = (
+        daily["sentiment_mean"] - grouped["sentiment_mean"].shift(1)
+    )
+    daily["sentiment_mean_lag_1d"] = grouped["sentiment_mean"].shift(1)
+    daily["sentiment_mean_lag_3d"] = grouped["sentiment_mean"].shift(3)
+    daily["sentiment_abs_mean_lag_1d"] = grouped["sentiment_abs_mean"].shift(1)
+    daily["sentiment_std_lag_1d"] = grouped["sentiment_std"].shift(1)
 
     lag_cols = [
         "article_count_change_1d",
@@ -243,7 +298,18 @@ def merge_market_and_sentiment(
     return daily.reset_index(drop=True)
 
 
-def build_dataset(paths: DatasetPaths, ticker_file_map: dict[str, Path]) -> tuple[pd.DataFrame, pd.DataFrame]:
+def build_dataset(
+    paths: DatasetPaths,
+    ticker_file_map: dict[str, Path],
+    scorer: str = "vader",
+) -> tuple[pd.DataFrame, pd.DataFrame]:
+    """Build the daily features dataset.
+
+    Parameters
+    ----------
+    scorer : "vader" | "finbert"
+        Which sentiment model to use for scoring articles.
+    """
     market_frames = []
     for ticker, csv_path in ticker_file_map.items():
         frame = pd.read_csv(csv_path, parse_dates=["Date"]).rename(columns={"Date": "date"})
@@ -254,8 +320,14 @@ def build_dataset(paths: DatasetPaths, ticker_file_map: dict[str, Path]) -> tupl
     market = pd.concat(market_frames, ignore_index=True)
     market = market.sort_values(["ticker", "date"]).reset_index(drop=True)
     market["date"] = pd.to_datetime(market["date"]).dt.normalize()
-    market = market.groupby("ticker", group_keys=False).apply(compute_market_features)
-    market = market.reset_index(drop=True)
+    market["return_1d"] = market.groupby("ticker")["close"].pct_change(1)
+    market["return_3d"] = market.groupby("ticker")["close"].pct_change(3)
+    market["rolling_volatility_5d"] = (
+        market.groupby("ticker")["return_1d"]
+        .rolling(5)
+        .std()
+        .reset_index(level=0, drop=True)
+    )
 
     articles = pd.read_csv(paths.articles_csv)
     articles = articles.copy()
@@ -263,7 +335,10 @@ def build_dataset(paths: DatasetPaths, ticker_file_map: dict[str, Path]) -> tupl
     articles = articles[
         pd.to_datetime(articles["published_at_utc"], utc=True) >= min_market_date
     ]
-    articles = score_articles(articles)
+    if scorer == "finbert":
+        articles = score_articles_finbert(articles)
+    else:
+        articles = score_articles(articles)
     aligned_articles = align_articles_to_sessions(articles, market[["ticker", "date"]])
     daily_sentiment = aggregate_sentiment_features(aligned_articles)
     daily = merge_market_and_sentiment(market, daily_sentiment)
